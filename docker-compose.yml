@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: styleek
+      POSTGRES_PASSWORD: styleek
+      POSTGRES_DB: styleek_ml
+    volumes:
+      - styleek_pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U styleek"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://styleek:styleek@db:5432/styleek_ml
+      API_KEY: CHANGE_ME_SECRET_KEY
+    ports:
+      - "8000:8000"
+    volumes:
+      - styleek_model_store:/app/model_store
+
+volumes:
+  styleek_pg_data:
+  styleek_model_store:

@@ -1,0 +1,129 @@
+"""
+استخراج متجه الميزات (20 بُعد) — نسخة Python مطابقة تمامًا لِـ MLFeatureExtractor
+في main.dart (سطر 2931-3041)، بحيث يبقى أي نموذج مُدرَّب سابقًا متوافقًا،
+ونفس الترتيب/المعنى لكل بُعد.
+
+فهارس الميزات (طابق main.dart سطر 2882-2901):
+  0  formal        7  occWork       14 favorite
+  1  casual        8  occUni        15 daysSinceWorn
+  2  sporty        9  occOuting     16 hasBrand
+  3  brightness   10  occSpecial    17 isLayerable
+  4  saturation   11  occSport      18 dnaFormal
+  5  isWarmColor  12  temperature   19 dnaCasual
+  6  seasonMatch  13  wearCount
+"""
+from __future__ import annotations
+import math
+from datetime import datetime, timezone
+from typing import Optional
+
+FEATURE_DIM = 20
+
+IDX_FORMAL, IDX_CASUAL, IDX_SPORTY = 0, 1, 2
+IDX_BRIGHTNESS, IDX_SATURATION, IDX_WARM_COLOR = 3, 4, 5
+IDX_SEASON_MATCH = 6
+IDX_OCC_WORK, IDX_OCC_UNI, IDX_OCC_OUTING, IDX_OCC_SPECIAL, IDX_OCC_SPORT = 7, 8, 9, 10, 11
+IDX_TEMPERATURE, IDX_WEAR_COUNT, IDX_FAVORITE, IDX_DAYS_SINCE = 12, 13, 14, 15
+IDX_BRAND, IDX_LAYERABLE = 16, 17
+IDX_DNA_FORMAL, IDX_DNA_CASUAL = 18, 19
+
+OCCASION_INDICES = [IDX_OCC_WORK, IDX_OCC_UNI, IDX_OCC_OUTING, IDX_OCC_SPECIAL, IDX_OCC_SPORT]
+PRACTICAL_INDICES = [IDX_FORMAL, IDX_CASUAL, IDX_SPORTY, IDX_SEASON_MATCH, IDX_TEMPERATURE, IDX_LAYERABLE]
+PERSONAL_TASTE_INDICES = [IDX_WEAR_COUNT, IDX_FAVORITE, IDX_DAYS_SINCE, IDX_DNA_FORMAL, IDX_DNA_CASUAL]
+
+# نفس جدول أوزان الفئات — main.dart سطر 2933-2945
+_CAT_WEIGHTS: dict[str, list[float]] = {
+    # [formal, casual, sporty, layerable]
+    "shirt":     [1.0, 0.3, 0.0, 0.0],
+    "tshirt":    [0.1, 0.9, 0.4, 0.0],
+    "hoodie":    [0.0, 0.7, 0.5, 1.0],
+    "pants":     [0.6, 0.5, 0.2, 0.0],
+    "jeans":     [0.2, 1.0, 0.3, 0.0],
+    "jacket":    [0.7, 0.4, 0.2, 1.0],
+    "shoes":     [0.4, 0.5, 0.6, 0.0],
+    "boots":     [0.5, 0.4, 0.1, 0.1],
+    "accessory": [0.6, 0.4, 0.1, 0.0],
+    "other":     [0.3, 0.5, 0.3, 0.0],
+}
+_DEFAULT_CAT_WEIGHTS = [0.3, 0.5, 0.3, 0.0]
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _hex_to_rgb(hex_color: str) -> Optional[tuple[int, int, int]]:
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return None
+    try:
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return None
+
+
+def extract_features(
+    *,
+    category_name: str,
+    colors: list[str],
+    season_name: str,          # 'summer' | 'winter' | 'all'
+    current_season: str,
+    occasion_name: Optional[str],   # 'work' | 'university' | 'outing' | 'special' | 'sport' | None
+    temperature: Optional[int],
+    wear_count: int,
+    is_favorite: bool,
+    last_worn_at: Optional[datetime],
+    brand: Optional[str],
+    is_layerable: bool,
+    dna_formal: float,
+    dna_casual: float,
+) -> list[float]:
+    """يطابق MLFeatureExtractor.extract في main.dart سطر 2948-3026."""
+    cat_w = _CAT_WEIGHTS.get(category_name, _DEFAULT_CAT_WEIGHTS)
+
+    season_match = 1.0 if (season_name == "all" or season_name == current_season) else 0.0
+
+    brightness, saturation, is_warm = 0.5, 0.5, False
+    if colors:
+        rgb = _hex_to_rgb(colors[0])
+        if rgb is not None:
+            r, g, b = rgb
+            brightness = (r * 0.299 + g * 0.587 + b * 0.114) / 255
+            mx, mn = max(r, g, b) / 255, min(r, g, b) / 255
+            saturation = (mx - mn) / mx if mx > 0 else 0.0
+            is_warm = r > b
+
+    occ = occasion_name or ""
+    occ_work = 1.0 if occ == "work" else 0.0
+    occ_uni = 1.0 if occ == "university" else 0.0
+    occ_out = 1.0 if occ == "outing" else 0.0
+    occ_special = 1.0 if occ == "special" else 0.0
+    occ_sport = 1.0 if occ == "sport" else 0.0
+
+    temp_norm = _clamp((temperature - 10) / 35.0, 0.0, 1.0) if temperature is not None else 0.5
+
+    wear_log = math.log(1 + wear_count) / 5.0
+
+    if last_worn_at is not None:
+        now = datetime.now(timezone.utc)
+        if last_worn_at.tzinfo is None:
+            last_worn_at = last_worn_at.replace(tzinfo=timezone.utc)
+        days_since = (now - last_worn_at).days
+    else:
+        days_since = 30
+    days_since = _clamp(float(days_since), 0, 365)
+    day_log = math.log(1 + days_since) / math.log(366)
+
+    return [
+        cat_w[0], cat_w[1], cat_w[2],
+        brightness, saturation, 1.0 if is_warm else 0.0,
+        season_match,
+        occ_work, occ_uni, occ_out, occ_special, occ_sport,
+        temp_norm,
+        _clamp(wear_log, 0.0, 1.0),
+        1.0 if is_favorite else 0.0,
+        day_log,
+        1.0 if brand else 0.0,
+        1.0 if is_layerable else 0.0,
+        dna_formal, dna_casual,
+    ]
