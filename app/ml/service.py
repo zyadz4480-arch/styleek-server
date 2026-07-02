@@ -1,3 +1,4 @@
+
 """
 طبقة الخدمة: تجمع بين قاعدة البيانات (Interaction/UserModelState) ومحرك StyleEnsemble.
 يعادل تجميع StyleMLOrchestrator.record() + trainAll() + predict() في مكان واحد،
@@ -17,6 +18,7 @@ from app.ml.ensemble import (
     softmax_weights, update_expert_logits,
 )
 from app.ml.store import load_model, save_model
+from app.ml import inspiration
 from app.schemas import ItemContext, PredictionOut
 
 
@@ -210,3 +212,26 @@ async def get_performance_summary(db: AsyncSession, user_id: str) -> dict:
         "expert_weights": dict(zip(EXPERT_NAMES, softmax_weights(state.expert_logits))),
         "test_metrics": state.test_accuracy or {},
     }
+
+
+# ============================================================
+#   جديد: إلهام بصري (كلمات بحث لـ Pexels بناءً على ذوق المستخدم المتعلَّم)
+# ============================================================
+async def get_inspiration(db: AsyncSession, user_id: str) -> dict:
+    """يبني كلمات بحث بصرية بناءً على متوسط ميزات القطع اللي المستخدم قبلها فعلاً."""
+    rows = (
+        await db.execute(
+            select(Interaction).where(Interaction.user_id == user_id, Interaction.label == 1.0)
+        )
+    ).scalars().all()
+
+    if len(rows) < 3:
+        return {"ready": False, "reason": "insufficient_accepted_interactions", "sample_count": len(rows)}
+
+    X = np.array([r.features for r in rows], dtype=float)
+    avg_features = X.mean(axis=0).tolist()
+
+    result = inspiration.build_inspiration_query(avg_features)
+    result["ready"] = True
+    result["sample_count"] = len(rows)
+    return result
