@@ -97,7 +97,7 @@ async def maybe_autotrain(db: AsyncSession, user_id: str) -> bool:
     )
     total = count_result.scalar_one()
 
-    if total - state.sample_count_at_last_train >= settings.retrain_every and total >= 5:
+    if total - state.sample_count_at_last_train >= settings.retrain_every and total >= 20:
         await train_user_model(db, user_id)
         return True
     return False
@@ -111,20 +111,23 @@ async def train_user_model(db: AsyncSession, user_id: str) -> dict:
         )
     ).scalars().all()
 
-    if len(rows) < 5:
+    if len(rows) < 20:
         return {"trained": False, "reason": "insufficient_data", "sample_count": len(rows)}
 
     X = np.array([r.features for r in rows], dtype=float)
     y = np.array([r.label for r in rows], dtype=float)
     ratings = np.array([r.rating for r in rows], dtype=float)
 
-    # تقسيم 80/20 — يطابق trainTestSplit في main.dart سطر 3127-3134
-    rng = np.random.default_rng(42)
+    # Shuffle مختلف في كل تدريب (بدل seed ثابت) — يمنع نفس التقسيم يتكرر دائمًا
+    rng = np.random.default_rng()
     idx = rng.permutation(len(rows))
     split = int(len(rows) * 0.8)
     train_idx, test_idx = idx[:split], idx[split:]
 
-    model = StyleNeuralNet()
+    # Warm-start: نكمل من آخر أوزان محفوظة بدل إعادة البدء من الصفر في كل
+    # مرة (بدلاً من عشوائية جديدة كاملة) — أسرع وأكثر استقرارًا مع الوقت.
+    state_check = await _get_or_create_state(db, user_id)
+    model = load_model(user_id) if state_check.is_trained else StyleNeuralNet()
     model.train(X[train_idx], y[train_idx], ratings[train_idx])
 
     test_metrics = {}
