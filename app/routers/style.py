@@ -1,10 +1,11 @@
 """
 نقاط الـ API الرئيسية — المعادل السيرفري لواجهة StyleMLOrchestrator في main.dart.
 
-POST /style/interactions   → يعادل orchestrator.record(...)
-POST /style/predict        → يعادل orchestrator.predict(...)
-POST /style/train/{user}   → يعادل orchestrator.trainAll() (تدريب يدوي فوري)
-GET  /style/summary/{user} → يعادل orchestrator.performanceSummary
+POST /style/interactions       → يعادل orchestrator.record(...)
+POST /style/predict            → يعادل orchestrator.predict(...)
+POST /style/train/{user}       → يعادل orchestrator.trainAll() (تدريب يدوي فوري)
+GET  /style/summary/{user}     → يعادل orchestrator.performanceSummary
+GET  /style/inspiration/{user} → جديد: كلمات بحث بصرية جاهزة لـ Pexels
 """
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,3 +48,9 @@ async def train(user_id: str, db: AsyncSession = Depends(get_db)):
 @router.get("/summary/{user_id}", response_model=PerformanceSummary)
 async def summary(user_id: str, db: AsyncSession = Depends(get_db)):
     return await service.get_performance_summary(db, user_id)
+
+
+@router.get("/inspiration/{user_id}")
+async def inspiration(user_id: str, db: AsyncSession = Depends(get_db)):
+    """يرجع كلمات بحث إنجليزية جاهزة تُستخدم مباشرة مع Pexels API لجلب صور إلهام."""
+    return await service.get_inspiration(db, user_id)
