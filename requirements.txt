@@ -6,7 +6,10 @@ psycopg2-binary==2.9.9
 alembic==1.13.2
 pydantic==2.9.2
 pydantic-settings==2.5.2
-scikit-learn==1.5.2
 numpy==1.26.4
-joblib==1.4.2
 python-dotenv==1.0.1
+
+# --- الشبكة العصبية (تحل محل scikit-learn/joblib) ---
+# نسخة CPU فقط عمدًا: أخف بكتير من نسخة CUDA الكاملة (مهم على Render)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1+cpu
