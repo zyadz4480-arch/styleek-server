@@ -1,8 +1,15 @@
-
 """
-طبقة الخدمة: تجمع بين قاعدة البيانات (Interaction/UserModelState) ومحرك StyleEnsemble.
+طبقة الخدمة: تجمع بين قاعدة البيانات (Interaction/UserModelState) ومحرك StyleNeuralNet.
 يعادل تجميع StyleMLOrchestrator.record() + trainAll() + predict() في مكان واحد،
 لكن بشكل غير متزامن (async) ومع تخزين دائم في PostgreSQL.
+
+تغيير مهم عن النسخة القديمة:
+  - كان الدمج بين "الخبراء" الخمسة يتم بأوزان يدوية (expert_logits) تُحدَّث
+    بقاعدة رياضية مكتوبة يدويًا بعد كل تفاعل (update_expert_logits).
+  - الآن الموديل شبكة عصبية واحدة (StyleNeuralNet) تتعلم كل شيء بنفسها
+    عبر إعادة تدريب كاملة (backpropagation) — فلا يوجد تحديث وزن يدوي
+    لكل تفاعل بمفرده؛ التعلّم يحصل دفعة واحدة في train_user_model عندما
+    تتراكم عيّنات كافية (نفس آلية maybe_autotrain القديمة).
 """
 from __future__ import annotations
 import numpy as np
@@ -13,10 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models import Interaction, UserModelState
 from app.ml.features import extract_features, FEATURE_DIM
-from app.ml.ensemble import (
-    StyleEnsemble, EXPERT_NAMES, INITIAL_LOGITS,
-    softmax_weights, update_expert_logits,
-)
+from app.ml.neural import StyleNeuralNet, EXPERT_NAMES
 from app.ml.store import load_model, save_model
 from app.ml import inspiration
 from app.schemas import ItemContext, PredictionOut
@@ -25,7 +29,10 @@ from app.schemas import ItemContext, PredictionOut
 async def _get_or_create_state(db: AsyncSession, user_id: str) -> UserModelState:
     state = await db.get(UserModelState, user_id)
     if state is None:
-        state = UserModelState(user_id=user_id, expert_logits=list(INITIAL_LOGITS))
+        # expert_logits لم يعد يُستخدَم فعليًا في القرار (الشبكة تتعلم الدمج
+        # داخليًا)، لكن نُبقي العمود بقيمة افتراضية محايدة للتوافق مع الجدول
+        # الحالي في قاعدة البيانات من غير الحاجة لِمigration.
+        state = UserModelState(user_id=user_id, expert_logits=[0.0] * len(EXPERT_NAMES))
         db.add(state)
         await db.flush()
     return state
@@ -58,13 +65,11 @@ async def record_interaction(
     final_rating = rating if rating is not None else (1.0 if accepted else 0.3)
     actual = 1.0 if accepted else 0.0
 
-    state = await _get_or_create_state(db, user_id)
-
-    # تحديث أوزان الخبراء إن كان النموذج مُدرَّبًا مسبقًا (main.dart سطر 4292-4306)
-    if state.is_trained:
-        model = load_model(user_id)
-        preds = model.expert_predictions_for_update(np.array(features))
-        state.expert_logits = update_expert_logits(state.expert_logits, actual, preds)
+    # ملاحظة: لم يعد هناك تحديث وزن يدوي لكل تفاعل — الشبكة العصبية تتعلم
+    # فقط عبر إعادة تدريب كاملة (train_user_model) تُستدعى تلقائيًا من
+    # maybe_autotrain عند تراكم عيّنات كافية. هذا أصح إحصائيًا لشبكة عصبية
+    # من محاولة تحديثها بعيّنة واحدة في كل مرة.
+    await _get_or_create_state(db, user_id)
 
     interaction = Interaction(
         user_id=user_id,
@@ -119,7 +124,7 @@ async def train_user_model(db: AsyncSession, user_id: str) -> dict:
     split = int(len(rows) * 0.8)
     train_idx, test_idx = idx[:split], idx[split:]
 
-    model = StyleEnsemble()
+    model = StyleNeuralNet()
     model.train(X[train_idx], y[train_idx], ratings[train_idx])
 
     test_metrics = {}
@@ -139,13 +144,12 @@ async def train_user_model(db: AsyncSession, user_id: str) -> dict:
         "trained": model.is_trained,
         "sample_count": len(rows),
         "test_metrics": test_metrics,
-        "expert_weights": dict(zip(EXPERT_NAMES, softmax_weights(state.expert_logits))),
+        "architecture": "neural_net_end_to_end",  # الدمج بين المسارات متعلَّم داخليًا، لا أوزان يدوية
     }
 
 
 async def predict_for_item(db: AsyncSession, user_id: str, item: ItemContext) -> PredictionOut:
     """يطابق StyleMLOrchestrator.predict() في main.dart سطر 4351-4392."""
-    state = await _get_or_create_state(db, user_id)
     model = load_model(user_id)
 
     features = extract_features(
@@ -164,7 +168,7 @@ async def predict_for_item(db: AsyncSession, user_id: str, item: ItemContext) ->
         dna_casual=item.dna_casual,
     )
 
-    result = model.predict_one(np.array(features), state.expert_logits)
+    result = model.predict_one(np.array(features))
 
     # يطابق عتبات main.dart AIConstants (سطر 118-122) و MLPrediction.labelAr/emoji
     if result.final_score >= 0.75:
@@ -209,7 +213,7 @@ async def get_performance_summary(db: AsyncSession, user_id: str) -> dict:
         "accept_ratio": (accepted / total) if total else 0.5,
         "is_trained": state.is_trained,
         "last_trained_at": state.last_trained_at,
-        "expert_weights": dict(zip(EXPERT_NAMES, softmax_weights(state.expert_logits))),
+        "architecture": "neural_net_end_to_end",
         "test_metrics": state.test_accuracy or {},
     }
 
