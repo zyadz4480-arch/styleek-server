@@ -110,3 +110,24 @@ class PerformanceSummary(BaseModel):
     architecture: str
 
     test_metrics: dict[str, Any] = Field(default_factory=dict)
+    from pydantic import BaseModel
+from typing import Literal
+
+
+class ReelInteractionIn(BaseModel):
+    """مدخل POST /reels/interaction — يطابق حقول ReelInteraction بالضبط."""
+    user_id: str
+    reel_id: str
+    signal_type: Literal["like", "skip", "watch", "share", "save"]
+
+    outfit_style: str | None = None
+    dominant_color: str | None = None
+    watch_seconds: float | None = None
+    total_seconds: float | None = None
+    content_type: str | None = None            # image | video
+    opened_profile_after: bool | None = None
+    position_in_session: int | None = None
+
+
+class ReelInteractionOut(BaseModel):
+    status: str  # "ok"
