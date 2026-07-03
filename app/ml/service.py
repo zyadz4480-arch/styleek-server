@@ -1,17 +1,13 @@
 """
-طبقة الخدمة: تجمع بين قاعدة البيانات (Interaction/UserModelState) ومحرك StyleNeuralNet.
-يعادل تجميع StyleMLOrchestrator.record() + trainAll() + predict() في مكان واحد،
-لكن بشكل غير متزامن (async) ومع تخزين دائم في PostgreSQL.
-
-تغيير مهم عن النسخة القديمة:
-  - كان الدمج بين "الخبراء" الخمسة يتم بأوزان يدوية (expert_logits) تُحدَّث
-    بقاعدة رياضية مكتوبة يدويًا بعد كل تفاعل (update_expert_logits).
-  - الآن الموديل شبكة عصبية واحدة (StyleNeuralNet) تتعلم كل شيء بنفسها
-    عبر إعادة تدريب كاملة (backpropagation) — فلا يوجد تحديث وزن يدوي
-    لكل تفاعل بمفرده؛ التعلّم يحصل دفعة واحدة في train_user_model عندما
-    تتراكم عيّنات كافية (نفس آلية maybe_autotrain القديمة).
+طبقة الخدمة — نسخة محسّنة:
+✅ قفل التدريب (training_lock) — يمنع تدريبين متزامنين لنفس المستخدم
+✅ حماية النموذج القديم — save_model لا يُستدعى إلا بعد نجاح التدريب
+✅ منع التدريب إذا لم تتغير البيانات (موجود مسبقاً في maybe_autotrain)
 """
+
 from __future__ import annotations
+
+import asyncio
 import numpy as np
 from datetime import datetime, timezone
 from sqlalchemy import select, func
@@ -25,18 +21,35 @@ from app.ml.store import load_model, save_model
 from app.ml import inspiration
 from app.schemas import ItemContext, PredictionOut
 
+# ── قفل التدريب ──────────────────────────────────────────────────────────────
+# مفتاح: user_id — قيمة: asyncio.Lock
+# يمنع بدء تدريبين متزامنين لنفس المستخدم (نفس المشكلة التي تحدث
+# عند استدعاء /train مرتين بسرعة أو تزامن maybe_autotrain مع /train اليدوي)
+_training_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_lock(user_id: str) -> asyncio.Lock:
+    """يُعيد Lock خاص بالمستخدم — يُنشئه إذا لم يكن موجوداً."""
+    if user_id not in _training_locks:
+        _training_locks[user_id] = asyncio.Lock()
+    return _training_locks[user_id]
+
+
+# ── دوال مساعدة ──────────────────────────────────────────────────────────────
 
 async def _get_or_create_state(db: AsyncSession, user_id: str) -> UserModelState:
     state = await db.get(UserModelState, user_id)
     if state is None:
-        # expert_logits لم يعد يُستخدَم فعليًا في القرار (الشبكة تتعلم الدمج
-        # داخليًا)، لكن نُبقي العمود بقيمة افتراضية محايدة للتوافق مع الجدول
-        # الحالي في قاعدة البيانات من غير الحاجة لِمigration.
-        state = UserModelState(user_id=user_id, expert_logits=[0.0] * len(EXPERT_NAMES))
+        state = UserModelState(
+            user_id=user_id,
+            expert_logits=[0.0] * len(EXPERT_NAMES),
+        )
         db.add(state)
         await db.flush()
     return state
 
+
+# ── تسجيل تفاعل ──────────────────────────────────────────────────────────────
 
 async def record_interaction(
     db: AsyncSession,
@@ -46,7 +59,7 @@ async def record_interaction(
     rating: float | None,
     item_id: str | None,
 ) -> Interaction:
-    """يطابق StyleMLOrchestrator.record() في main.dart سطر 4283-4321."""
+    """يطابق StyleMLOrchestrator.record() في main.dart."""
     features = extract_features(
         category_name=item.category_name,
         colors=item.colors,
@@ -62,13 +75,10 @@ async def record_interaction(
         dna_formal=item.dna_formal,
         dna_casual=item.dna_casual,
     )
+
     final_rating = rating if rating is not None else (1.0 if accepted else 0.3)
     actual = 1.0 if accepted else 0.0
 
-    # ملاحظة: لم يعد هناك تحديث وزن يدوي لكل تفاعل — الشبكة العصبية تتعلم
-    # فقط عبر إعادة تدريب كاملة (train_user_model) تُستدعى تلقائيًا من
-    # maybe_autotrain عند تراكم عيّنات كافية. هذا أصح إحصائيًا لشبكة عصبية
-    # من محاولة تحديثها بعيّنة واحدة في كل مرة.
     await _get_or_create_state(db, user_id)
 
     interaction = Interaction(
@@ -86,11 +96,19 @@ async def record_interaction(
     return interaction
 
 
+# ── التدريب التلقائي ──────────────────────────────────────────────────────────
+
 async def maybe_autotrain(db: AsyncSession, user_id: str) -> bool:
     """
     يُدرِّب تلقائيًا إن تراكم settings.retrain_every عيّنة جديدة منذ آخر تدريب.
-    يطابق فكرة StyleTrainingScheduler في main.dart (سطر 289-347).
+    يتجاهل الطلب بصمت إذا كان التدريب جارياً (القفل مشغول).
     """
+    lock = _get_lock(user_id)
+
+    # إذا كان التدريب جارياً → تخطّ بدون انتظار
+    if lock.locked():
+        return False
+
     state = await _get_or_create_state(db, user_id)
     count_result = await db.execute(
         select(func.count()).select_from(Interaction).where(Interaction.user_id == user_id)
@@ -100,59 +118,113 @@ async def maybe_autotrain(db: AsyncSession, user_id: str) -> bool:
     if total - state.sample_count_at_last_train >= settings.retrain_every and total >= 20:
         await train_user_model(db, user_id)
         return True
+
     return False
 
 
+# ── التدريب الكامل ────────────────────────────────────────────────────────────
+
 async def train_user_model(db: AsyncSession, user_id: str) -> dict:
-    """يطابق StyleMLOrchestrator.trainAll() في main.dart سطر 4325-4347."""
-    rows = (
-        await db.execute(
-            select(Interaction).where(Interaction.user_id == user_id).order_by(Interaction.created_at)
-        )
-    ).scalars().all()
+    """
+    يطابق StyleMLOrchestrator.trainAll() في main.dart.
 
-    if len(rows) < 20:
-        return {"trained": False, "reason": "insufficient_data", "sample_count": len(rows)}
+    التحسينات:
+    ① القفل يمنع تدريبين متزامنين — الطلب الثاني يُرجع فوراً بدون تدريب.
+    ② save_model لا يُستدعى إلا بعد نجاح التدريب الكامل
+       (النموذج القديم يبقى سليماً إذا فشل التدريب الجديد).
+    """
+    lock = _get_lock(user_id)
 
-    X = np.array([r.features for r in rows], dtype=float)
-    y = np.array([r.label for r in rows], dtype=float)
-    ratings = np.array([r.rating for r in rows], dtype=float)
+    # ① إذا كان التدريب جارياً → ارجع فوراً بدون انتظار
+    if lock.locked():
+        return {
+            "trained": False,
+            "reason": "training_already_in_progress",
+            "sample_count": 0,
+        }
 
-    # Shuffle مختلف في كل تدريب (بدل seed ثابت) — يمنع نفس التقسيم يتكرر دائمًا
-    rng = np.random.default_rng()
-    idx = rng.permutation(len(rows))
-    split = int(len(rows) * 0.8)
-    train_idx, test_idx = idx[:split], idx[split:]
+    async with lock:
+        # ② جلب البيانات
+        rows = (
+            await db.execute(
+                select(Interaction)
+                .where(Interaction.user_id == user_id)
+                .order_by(Interaction.created_at)
+            )
+        ).scalars().all()
 
-    # Warm-start: نكمل من آخر أوزان محفوظة بدل إعادة البدء من الصفر في كل
-    # مرة (بدلاً من عشوائية جديدة كاملة) — أسرع وأكثر استقرارًا مع الوقت.
-    state_check = await _get_or_create_state(db, user_id)
-    model = load_model(user_id) if state_check.is_trained else StyleNeuralNet()
-    model.train(X[train_idx], y[train_idx], ratings[train_idx])
+        if len(rows) < 20:
+            return {
+                "trained": False,
+                "reason": "insufficient_data",
+                "sample_count": len(rows),
+            }
 
-    test_metrics = {}
-    if model.is_trained and len(test_idx) > 0:
-        test_metrics = model.evaluate(X[test_idx], y[test_idx])
+        X = np.array([r.features for r in rows], dtype=float)
+        y = np.array([r.label for r in rows], dtype=float)
+        ratings = np.array([r.rating for r in rows], dtype=float)
 
-    save_model(user_id, model)
+        rng = np.random.default_rng()
+        idx = rng.permutation(len(rows))
+        split = int(len(rows) * 0.8)
+        train_idx, test_idx = idx[:split], idx[split:]
 
-    state = await _get_or_create_state(db, user_id)
-    state.is_trained = model.is_trained
-    state.sample_count_at_last_train = len(rows)
-    state.test_accuracy = test_metrics
-    state.last_trained_at = datetime.now(timezone.utc)
-    await db.commit()
+        # ③ Warm-start من آخر أوزان محفوظة
+        state_check = await _get_or_create_state(db, user_id)
+        model = load_model(user_id) if state_check.is_trained else StyleNeuralNet()
 
-    return {
-        "trained": model.is_trained,
-        "sample_count": len(rows),
-        "test_metrics": test_metrics,
-        "architecture": "neural_net_end_to_end",  # الدمج بين المسارات متعلَّم داخليًا، لا أوزان يدوية
-    }
+        # ④ التدريب — في حالة الفشل، النموذج القديم لا يتأثر (لم نحفظ بعد)
+        try:
+            model.train(X[train_idx], y[train_idx], ratings[train_idx])
+        except Exception as e:
+            return {
+                "trained": False,
+                "reason": f"training_failed: {e}",
+                "sample_count": len(rows),
+            }
+
+        # ⑤ التقييم
+        test_metrics = {}
+        if model.is_trained and len(test_idx) > 0:
+            try:
+                test_metrics = model.evaluate(X[test_idx], y[test_idx])
+            except Exception:
+                test_metrics = {}
+
+        # ⑥ الحفظ — فقط بعد نجاح التدريب والتقييم
+        try:
+            save_model(user_id, model)
+        except Exception as e:
+            return {
+                "trained": False,
+                "reason": f"save_failed: {e}",
+                "sample_count": len(rows),
+            }
+
+        # ⑦ تحديث الحالة في قاعدة البيانات
+        state = await _get_or_create_state(db, user_id)
+        state.is_trained = model.is_trained
+        state.sample_count_at_last_train = len(rows)
+        state.test_accuracy = test_metrics
+        state.last_trained_at = datetime.now(timezone.utc)
+        await db.commit()
+
+        return {
+            "trained": model.is_trained,
+            "sample_count": len(rows),
+            "test_metrics": test_metrics,
+            "architecture": "neural_net_end_to_end",
+        }
 
 
-async def predict_for_item(db: AsyncSession, user_id: str, item: ItemContext) -> PredictionOut:
-    """يطابق StyleMLOrchestrator.predict() في main.dart سطر 4351-4392."""
+# ── التنبؤ ────────────────────────────────────────────────────────────────────
+
+async def predict_for_item(
+    db: AsyncSession,
+    user_id: str,
+    item: ItemContext,
+) -> PredictionOut:
+    """يطابق StyleMLOrchestrator.predict() في main.dart."""
     model = load_model(user_id)
 
     features = extract_features(
@@ -173,7 +245,6 @@ async def predict_for_item(db: AsyncSession, user_id: str, item: ItemContext) ->
 
     result = model.predict_one(np.array(features))
 
-    # يطابق عتبات main.dart AIConstants (سطر 118-122) و MLPrediction.labelAr/emoji
     if result.final_score >= 0.75:
         label, emoji = "مثالية", "🔥"
     elif result.final_score >= 0.55:
@@ -197,43 +268,60 @@ async def predict_for_item(db: AsyncSession, user_id: str, item: ItemContext) ->
     )
 
 
+# ── ملخص الأداء ───────────────────────────────────────────────────────────────
+
 async def get_performance_summary(db: AsyncSession, user_id: str) -> dict:
     state = await _get_or_create_state(db, user_id)
+
     count_result = await db.execute(
         select(func.count()).select_from(Interaction).where(Interaction.user_id == user_id)
     )
     total = count_result.scalar_one()
 
     accept_result = await db.execute(
-        select(func.count()).select_from(Interaction)
-        .where(Interaction.user_id == user_id, Interaction.label == 1.0)
+        select(func.count())
+        .select_from(Interaction)
+        .where(
+            Interaction.user_id == user_id,
+            Interaction.label == 1.0,
+        )
     )
     accepted = accept_result.scalar_one()
+
+    # هل التدريب جارٍ الآن؟
+    lock = _get_lock(user_id)
 
     return {
         "user_id": user_id,
         "sample_count": total,
         "accept_ratio": (accepted / total) if total else 0.5,
         "is_trained": state.is_trained,
+        "training_in_progress": lock.locked(),
         "last_trained_at": state.last_trained_at,
         "architecture": "neural_net_end_to_end",
         "test_metrics": state.test_accuracy or {},
     }
 
 
-# ============================================================
-#   جديد: إلهام بصري (كلمات بحث لـ Pexels بناءً على ذوق المستخدم المتعلَّم)
-# ============================================================
+# ── الإلهام البصري ────────────────────────────────────────────────────────────
+
 async def get_inspiration(db: AsyncSession, user_id: str) -> dict:
-    """يبني كلمات بحث بصرية بناءً على متوسط ميزات القطع اللي المستخدم قبلها فعلاً."""
+    """يبني كلمات بحث بصرية بناءً على متوسط ميزات القطع المقبولة."""
     rows = (
         await db.execute(
-            select(Interaction).where(Interaction.user_id == user_id, Interaction.label == 1.0)
+            select(Interaction).where(
+                Interaction.user_id == user_id,
+                Interaction.label == 1.0,
+            )
         )
     ).scalars().all()
 
     if len(rows) < 3:
-        return {"ready": False, "reason": "insufficient_accepted_interactions", "sample_count": len(rows)}
+        return {
+            "ready": False,
+            "reason": "insufficient_accepted_interactions",
+            "sample_count": len(rows),
+        }
 
     X = np.array([r.features for r in rows], dtype=float)
     avg_features = X.mean(axis=0).tolist()
@@ -241,4 +329,5 @@ async def get_inspiration(db: AsyncSession, user_id: str) -> dict:
     result = inspiration.build_inspiration_query(avg_features)
     result["ready"] = True
     result["sample_count"] = len(rows)
+
     return result
