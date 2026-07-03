@@ -52,7 +52,7 @@ class TrainResult(BaseModel):
     expert_weights: dict
 
 
- class PerformanceSummary(BaseModel):
+class PerformanceSummary(BaseModel):
     user_id: str
     sample_count: int
     accept_ratio: float
