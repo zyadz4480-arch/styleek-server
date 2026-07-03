@@ -91,10 +91,20 @@ class PerformanceSummary(BaseModel):
 
     user_id: str
     sample_count: int
+    # [AUTOTRAIN] عدد العيّنات وقت آخر تدريب ناجح — يُستخدم من جانب Flutter
+    # لحساب "كم عيّنة جديدة تراكمت منذ آخر تدريب" وتقرير الحاجة لإعادة
+    # التدريب (بدل الاعتماد فقط على is_trained). يُقرأ من UserModelState،
+    # وليس من النموذج نفسه (النموذج يحتوي فقط على أوزانه).
+    sample_count_at_last_train: int = 0
     accept_ratio: float
 
     is_trained: bool
     training_in_progress: bool = False
+    # [SINGLE SOURCE OF TRUTH] السيرفر وحده يقرر — العميل (Flutter وأي
+    # واجهة أخرى مستقبلاً) يقرأ هذا الحقل وينفّذ POST /train بدون معرفة
+    # أرقام العتبات (20 عيّنة أولى، 25 عيّنة لإعادة التدريب...). أي تغيير
+    # على هذه الأرقام يحدث في service.py فقط، بلا حاجة لتحديث أي عميل.
+    needs_training: bool = False
 
     last_trained_at: datetime | None = None
     architecture: str
