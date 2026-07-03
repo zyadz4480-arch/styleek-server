@@ -52,11 +52,11 @@ class TrainResult(BaseModel):
     expert_weights: dict
 
 
-class PerformanceSummary(BaseModel):
+ class PerformanceSummary(BaseModel):
     user_id: str
     sample_count: int
     accept_ratio: float
     is_trained: bool
     last_trained_at: Optional[datetime]
-    expert_weights: dict
-    test_metrics: dict
+    architecture: str
+    test_metrics: dict = Field(default_factory=dict)
