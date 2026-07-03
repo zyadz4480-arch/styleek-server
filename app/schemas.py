@@ -1,65 +1,102 @@
+"""
+Pydantic schemas — عقود البيانات بين Flutter و FastAPI.
+يطابق هياكل البيانات في main.dart (ClothingItem, MLPrediction, إلخ).
+"""
+
 from __future__ import annotations
+
 from datetime import datetime
-from typing import Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# المدخلات
+# ──────────────────────────────────────────────────────────────────────────────
+
 class ItemContext(BaseModel):
-    """بيانات القطعة + السياق، تُستخدم لبناء متجه الميزات على السيرفر
-    (نفس مدخلات MLFeatureExtractor.extract في main.dart سطر 2948).
-    """
+    """وصف القطعة — يطابق ClothingItem في main.dart."""
 
     category_name: str
     colors: list[str] = Field(default_factory=list)
-    season_name: str = "all"  # summer | winter | all
+
+    season_name: str = "all"
     current_season: str = "all"
-    occasion_name: Optional[str] = None  # work | university | outing | special | sport
-    temperature: Optional[int] = None
-    wear_count: int = 0
+    occasion_name: str | None = None
+
+    temperature: int | None = Field(default=None, ge=-50, le=70)
+
+    wear_count: int = Field(default=0, ge=0)
     is_favorite: bool = False
-    last_worn_at: Optional[datetime] = None
-    brand: Optional[str] = None
+
+    last_worn_at: datetime | None = None
+    brand: str | None = None
     is_layerable: bool = False
-    dna_formal: float = 0.5
-    dna_casual: float = 0.5
+
+    dna_formal: float = Field(default=0.5, ge=0.0, le=1.0)
+    dna_casual: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class InteractionIn(BaseModel):
+    """تفاعل مستخدم — يطابق StyleMLOrchestrator.record() في main.dart."""
+
     user_id: str
     item: ItemContext
     accepted: bool
-    rating: Optional[float] = None  # إن لم تُرسَل تُحسب تلقائيًا (0.3 رفض / 1.0 قبول)
-    item_id: Optional[str] = None
 
+    rating: float | None = Field(default=None, ge=0.0, le=1.0)
+    item_id: str | None = None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# المخرجات
+# ──────────────────────────────────────────────────────────────────────────────
 
 class PredictionOut(BaseModel):
+    """نتيجة التنبؤ — يطابق MLPrediction في main.dart."""
+
     logistic_proba: float
     linear_rating: float
     svm_confidence: float
     tree_proba: float
     forest_proba: float
     forest_agreement: float
+
     final_score: float
     is_ml_prediction: bool
+
     label_ar: str
     emoji: str
 
 
 class TrainResult(BaseModel):
+    """نتيجة التدريب — يُرجعها POST /style/train/{user_id}."""
+
     user_id: str
     sample_count: int
     trained: bool
-    train_metrics: dict
-    test_metrics: dict
-    expert_weights: dict
+
+    train_metrics: dict[str, Any] = Field(default_factory=dict)
+    test_metrics: dict[str, Any] = Field(default_factory=dict)
+
+    # أُبقي للتوافق مع الإصدارات القديمة من العميل (Flutter)
+    expert_weights: dict[str, Any] = Field(default_factory=dict)
 
 
 class PerformanceSummary(BaseModel):
+    """
+    ملخص أداء النموذج — يُرجعه GET /style/summary/{user_id}.
+    """
+
     user_id: str
     sample_count: int
     accept_ratio: float
+
     is_trained: bool
-    last_trained_at: Optional[datetime]
+    training_in_progress: bool = False
+
+    last_trained_at: datetime | None = None
     architecture: str
-    test_metrics: dict = Field(default_factory=dict)
+
+    test_metrics: dict[str, Any] = Field(default_factory=dict)
