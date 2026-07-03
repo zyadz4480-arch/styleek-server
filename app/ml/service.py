@@ -35,6 +35,21 @@ def _get_lock(user_id: str) -> asyncio.Lock:
     return _training_locks[user_id]
 
 
+def _needs_training(state: UserModelState, total: int) -> bool:
+    """
+    [SINGLE SOURCE OF TRUTH] قرار "هل يحتاج هذا المستخدم تدريباً الآن؟"
+    مُستخرَج في دالة واحدة يستخدمها كل من maybe_autotrain() (يُشغِّل
+    التدريب فعلياً) و get_performance_summary() (يُبلِّغ العميل عبر
+    needs_training بدون تشغيل شيء). أي تعديل مستقبلي على الشرط (رفع/خفض
+    25، إضافة قيود جديدة) يكفي أن يحدث هنا مرة واحدة — لا حاجة لتكرار
+    المنطق في Flutter أو أي عميل آخر (ويب/iOS) يُبنى لاحقاً.
+    """
+    return (
+        (total - state.sample_count_at_last_train) >= settings.retrain_every
+        and total >= 20
+    )
+
+
 # ── دوال مساعدة ──────────────────────────────────────────────────────────────
 
 async def _get_or_create_state(db: AsyncSession, user_id: str) -> UserModelState:
@@ -115,7 +130,7 @@ async def maybe_autotrain(db: AsyncSession, user_id: str) -> bool:
     )
     total = count_result.scalar_one()
 
-    if total - state.sample_count_at_last_train >= settings.retrain_every and total >= 20:
+    if _needs_training(state, total):
         await train_user_model(db, user_id)
         return True
 
@@ -291,12 +306,19 @@ async def get_performance_summary(db: AsyncSession, user_id: str) -> dict:
     # هل التدريب جارٍ الآن؟
     lock = _get_lock(user_id)
 
+    # [SINGLE SOURCE OF TRUTH] نفس شرط maybe_autotrain بالضبط — العميل
+    # (Flutter أو أي واجهة أخرى مستقبلاً) لا يحتاج معرفة الأرقام (20، 25)،
+    # فقط يقرأ needs_training وينفّذ. لا تدريب يبدأ من هنا — فقط إبلاغ.
+    needs_training = (not lock.locked()) and _needs_training(state, total)
+
     return {
         "user_id": user_id,
         "sample_count": total,
+        "sample_count_at_last_train": state.sample_count_at_last_train,
         "accept_ratio": (accepted / total) if total else 0.5,
         "is_trained": state.is_trained,
         "training_in_progress": lock.locked(),
+        "needs_training": needs_training,
         "last_trained_at": state.last_trained_at,
         "architecture": "neural_net_end_to_end",
         "test_metrics": state.test_accuracy or {},
