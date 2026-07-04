@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db  # ← عدّل الاسم هنا لو مختلف عندك
 from app.schemas import ReelInteractionIn, ReelInteractionOut
-from app.services.reel_service import record_reel_interaction  # ← عدّل المسار حسب مكان الدالة عندك
+from app.ml.reel_service import record_reel_interaction# ← عدّل المسار حسب مكان الدالة عندك
 
 router = APIRouter(prefix="/reels", tags=["reels"])
 
