@@ -3,8 +3,16 @@ from contextlib import asynccontextmanager
 
 from app.database import init_models
 from app.routers import style
-from app.routers import reels
 
+# ---- تشخيص استيراد reels ----
+try:
+    from app.routers import reels
+    print("✅ reels imported successfully")
+except Exception as e:
+    print("❌ reels import failed:")
+    print(repr(e))
+    raise
+# -----------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -14,7 +22,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Styleek AI Server",
-    description="السيرفر الذي يستضيف قلب الذكاء الاصطناعي لتطبيق ستايلك (نُقل من main.dart)",
+    description="خادم الذكاء الاصطناعي لتطبيق ستايليك",
     version="1.0.0",
     lifespan=lifespan,
 )
