@@ -14,8 +14,7 @@ except Exception as e:
     raise
 # -----------------------------
 
-# ---- [مؤقت] راوتر تشخيصي لعرض interactions_v2 من المتصفح ----
-from app.routers import debug
+# ---- [مؤقت] راوتر تشخيصي لعرض interactions_v2 من المتصفح --
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,7 +31,6 @@ app = FastAPI(
 
 app.include_router(style.router)
 app.include_router(reels.router)
-app.include_router(debug.router)  # [مؤقت] يُحذف بعد التأكد من الكتابة المزدوجة
 
 
 @app.get("/health")
