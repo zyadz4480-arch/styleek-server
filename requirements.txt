@@ -8,6 +8,7 @@ pydantic==2.9.2
 pydantic-settings==2.5.2
 numpy==1.26.4
 python-dotenv==1.0.1
+pgvector==0.3.6
 
 # --- الشبكة العصبية (تحل محل scikit-learn/joblib) ---
 # نسخة CPU فقط عمدًا: أخف بكتير من نسخة CUDA الكاملة (مهم على Render)
