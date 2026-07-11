@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # عدد التفاعلات الجديدة قبل إعادة تدريب كل نماذج المستخدم تلقائيًا
     retrain_every: int = 25
 
+    # [جديد] مفتاح سرّي منفصل عن api_key العام — يحمي POST
+    # /internal/automata/nightly (يُستدعى من Render Cron Job فقط، لا Flutter)
+    cron_secret: str = "CHANGE_ME_CRON_SECRET"
+
     class Config:
         env_file = ".env"
 
