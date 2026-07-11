@@ -1,0 +1,17 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy==2.0.35
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+alembic==1.13.2
+pydantic==2.9.2
+pydantic-settings==2.5.2
+numpy==1.26.4
+python-dotenv==1.0.1
+pgvector==0.3.6
+scikit-learn==1.5.2  # [جديد] مطلوب من app/ml/automata/automaton.py (NearestNeighbors في _birth_new_cells) — لم يكن موجودًا سابقًا
+
+# --- الشبكة العصبية (تحل محل scikit-learn/joblib) ---
+# نسخة CPU فقط عمدًا: أخف بكتير من نسخة CUDA الكاملة (مهم على Render)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1+cpu
